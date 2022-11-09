@@ -122,7 +122,7 @@ void setup()
 #if defined(DEBUG)
   Serial2.println(F("LMIC configurada"));
 #endif
-os_setCallback (&sendjob, do_send); 
+  os_setCallback(&sendjob, do_send);
   // Informamos al temporizador que estamos despiertos.
   wakeUp();
 
@@ -346,6 +346,10 @@ void lecturaDatos()
 
   // Ya tenemos la tensión, ahora la pasamos a grados.
   temperatura = (tension - TMP36_V_A_0_GRADOS) * 100.0;
+
+  // Pasamos los datos a formato Cayenne
+  datosCayenne.reset();
+  datosCayenne.addTemperature(1, temperatura);
 }
 
 void do_send(osjob_t *j)
