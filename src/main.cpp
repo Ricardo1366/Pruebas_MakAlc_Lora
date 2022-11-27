@@ -1,24 +1,14 @@
-#include <Arduino.h>      // Obligatorio en PlatformIO
-#include <config.h>       // Parámetros de configuración del programa
-#include <dispositivo.h>  // Fichero donde se definen CLAVES_DEVEUI, CLAVES_APPEUI y CLAVES_APPKEY (no se sube a GitHub)
-#include <pines.h>        // Definición de pines de la placa.
+#include <Arduino.h>                      // Obligatorio en PlatformIO
+#include <dispositivo.h>                  // Fichero donde se definen CLAVES_DEVEUI, CLAVES_APPEUI y CLAVES_APPKEY (no se sube a GitHub)
+#include <pines.h>                        // Definición de pines de la placa.
 #include <funciones.h>
-#include <lmic.h>         // Libreria encargada de las comunicaciones.
-#include <hal\hal.h>      // Complemento de la libreria Lmic. Se descarga automáticamente al descargar Lmic
-#include <RocketScream_LowPowerAVRZero.h>   // Libreria para controls del consumo y poner a dormir al micro.
-#include <CayenneLPP.h>   // Libreria encargada de formatear los datos para el envío a Cayenne
-
-// Declaración de funciones.
-void onEvent(ev_t ev);
-void wakeUp(void);
-void do_send(osjob_t *j);
-void grabaRegistro(int evento);
-
-// void controlEventosRecepcion(void *pUserData, uint8_t port, const uint8_t *pMsg, size_t nMsg);
+#include <adc.h>                          // Funciones para leer el voltaje de la bateria.
+#include <RocketScream_LowPowerAVRZero.h> // Libreria para controls del consumo y poner a dormir al micro.
+#include <CayenneLPP.h>                   // Libreria encargada de formatear los datos para el envío a Cayenne
 
 void lecturaDatos();
 
-unsigned long inicioCuentaAtras;
+unsigned long inicioCuentaAtras;          // Variable genérica para controlar tiempos en bucles.
 
 /*******************************************************
  * Pines del ATmega4808 no utilizados en la aplicación *
@@ -45,8 +35,9 @@ static const u1_t PROGMEM APPKEY[16] = {CLAVES_APPKEY};
 void os_getDevKey(u1_t *buf) { memcpy_P(buf, APPKEY, 16); }
 // ############################################################################
 
-// Sensor de temperatura y humedad.
+// Datos conversor ADC
 const double tensionReferencia = 1.5, resolucionLectura = 1023;
+// Sensor de temperatura y humedad.
 double temperatura, lecturaTMP36, tension;
 
 // Reservamos espacio para temperatura.
@@ -73,7 +64,7 @@ void setup()
 #endif
   // Iniciamos LMIC.
   os_init();
-  // 
+  //
   LMIC_reset();
 
   // Reduce el consumo de los pines que no se van a usar en el ATmega4808
@@ -83,7 +74,6 @@ void setup()
     LowPower.disablePinISC(unusedPins[index]);
   }
 
-  // Configuramos la tensión de referencia para la lectura del TMP36
   analogReference(INTERNAL1V5);
 
   // Configuramos pin de encendido/apagado del TMP36
@@ -108,6 +98,7 @@ void setup()
   LMIC_setDrTxpow(DR_SF7, 14); // 7,14
 #if defined(DEBUG)
   Serial2.println(F("LMIC configurada"));
+  lectura = analogRead(PIN_A3);
 #endif
   // Informamos al temporizador que estamos despiertos.
   wakeUp();
@@ -116,10 +107,8 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(TPL5010_WAKE), wakeUp, FALLING);
 
   // Hacemos la primera lectura y nuestro primer envio de datos.
-  nuevaLectura = true;
-#if defined(DEBUG)
-  lectura = analogRead(PIN_A3);
-#endif
+  lecturaDatos();
+  do_send(&sendjob);
 }
 
 void loop()
@@ -138,46 +127,19 @@ void loop()
     }
 
     // Comprobamos si hay que "dormir" el micro.
+    // Probando modo "Solo dormir"
     if (aDormir && conectados)
     {
       // Trasmisión finalizada y estamos conectados. ¡ A DORMIR !
 #if defined(DEBUG)
-      grabaRegistro(EV_A_DORMIR);
+      grabaRegistro(EV_A_DORMIR_CONECTADO);
 #endif
       LowPower.powerDown();
       aDormir = false;
       nuevaLectura = true;
-    }
-    if (aDormir && !conectados)
-    {
-      // La trasmisión a finalizado, pero todavia no hemos conectado.
-      // Esperamos unos segundos antes de dormir.
-      if (millis() - cuentaAtras > TIEMPO_ESPERA)
-      {
-        // Si hemos superado el tiempo de respuesta de "unidos", probamos de nuevo.
-        cuentaAtras = millis();
-        numeroIntentos++;
-        nuevaLectura = true;
-      }
-      if (numeroIntentos == INTENTOS_POR_INICIO)
-      {
-        // Hemos llegado al número de intentos de conexión por inicio.
-        numeroIntentos = 0;
-        iniciosFallidos++;
-        aDormir = false;
-        if (iniciosFallidos == INICIOS_FALLIDOS_MAX)
-        {
-          iniciosDescanso = INICIOS_DESCANSO;
-        }
-        // Contabilizamos un fallo y nos ponemos a dormir.
 #if defined(DEBUG)
-        grabaRegistro(EV_A_DORMIR);
+      grabaRegistro(0);
 #endif
-        LowPower.powerDown();
-        // Al despertar lo intentamos de nuevo.
-        aDormir = false;
-        nuevaLectura = true;
-      }
     }
 
     // Acabamos de despertar. Comprobamos si hay que hacer un envio.
@@ -196,7 +158,8 @@ void loop()
 #if defined(DEBUG)
       Serial2.println(F("Programando envío."));
 #endif
-      do_send(&sendjob);
+      // do_send(&sendjob);
+      os_setCallback(&sendjob, do_send);
       envioDatos = false;
     }
     // Comprueba si tiene que hacer un envío.
@@ -219,7 +182,7 @@ void loop()
       hora = registro.tiempo;
 
       Serial2.print(++contador);
-      if (registro.evento < 27)
+      if (registro.evento < 30)
       {
         Serial2.print(" | ");
         Serial2.printf("%02u:%02u:%02u.%03u", hora, minutos, segundos, milisegundos);
@@ -243,17 +206,23 @@ void loop()
 // TIC Timer 18k -> 36s, 20k -> 60s.
 void wakeUp(void)
 {
+#if defined(DEBUG)
+  grabaRegistro(EV_DESPIERTO);
+#endif
+
   digitalWrite(TPL5010_DONE, HIGH);
   // Añadimos un delay para el tiempo de señal en alto de DONE del TPL5010.
-  for (char i = 0; i < 5; i++)
+  for (char i = 0; i < 5; i++) // Pendiente comprobación, pero creo que no irve de nada.
   {
   } // Ancho de pulso mínimo 100 ns. 8.5 us con i < 3.
   digitalWrite(TPL5010_DONE, LOW);
+  nuevaLectura = true;
 }
 
 void onEvent(ev_t ev)
 {
 #if defined(DEBUG)
+  grabaRegistro(ev);
   Serial2.print(F("Evento: "));
   Serial2.println(ev);
 #endif
@@ -261,42 +230,42 @@ void onEvent(ev_t ev)
   switch (ev)
   {
   case EV_SCAN_TIMEOUT:
-#if defined(DEBUG)
-    grabaRegistro(EV_SCAN_TIMEOUT);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_SCAN_TIMEOUT);
+    // #endif
     break;
   case EV_BEACON_FOUND:
-#if defined(DEBUG)
-    grabaRegistro(EV_BEACON_FOUND);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_BEACON_FOUND);
+    // #endif
     break;
   case EV_BEACON_MISSED:
-#if defined(DEBUG)
-    grabaRegistro(EV_BEACON_MISSED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_BEACON_MISSED);
+    // #endif
     break;
   case EV_BEACON_TRACKED:
-#if defined(DEBUG)
-    grabaRegistro(EV_BEACON_TRACKED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_BEACON_TRACKED);
+    // #endif
     break;
   case EV_JOINING:
     // Se ha lanzado una petición de conexión.
     // Controlamos el tiempo que pasa antes de ponernos a dormir.
     conectados = false;
     cuentaAtras = millis();
-#if defined(DEBUG)
-    grabaRegistro(EV_JOINING);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_JOINING);
+    // #endif
     break;
   case EV_JOINED:
     // Unidos con exito.
     numeroIntentos = 0;
     iniciosFallidos = 0;
     conectados = true;
-#if defined(DEBUG)
-    grabaRegistro(EV_JOINED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_JOINED);
+    // #endif
     u4_t netid = 0;
     devaddr_t devaddr = 0;
     u1_t nwkKey[16];
@@ -307,82 +276,81 @@ void onEvent(ev_t ev)
     LMIC_setLinkCheckMode(0); // 0
     break;
   case EV_RFU1:
-#if defined(DEBUG)
-    grabaRegistro(EV_RFU1);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_RFU1);
+    // #endif
     break;
   case EV_JOIN_FAILED:
-#if defined(DEBUG)
-    grabaRegistro(EV_JOIN_FAILED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_JOIN_FAILED);
+    // #endif
     break;
   case EV_REJOIN_FAILED:
-#if defined(DEBUG)
-    grabaRegistro(EV_REJOIN_FAILED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_REJOIN_FAILED);
+    // #endif
     break;
   case EV_TXCOMPLETE:
-#if defined(DEBUG)
-    grabaRegistro(EV_TXCOMPLETE);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_TXCOMPLETE);
+    // #endif
     aDormir = true;
     break;
   case EV_LOST_TSYNC:
-#if defined(DEBUG)
-    grabaRegistro(EV_LOST_TSYNC);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_LOST_TSYNC);
+    // #endif
     break;
   case EV_RESET:
-#if defined(DEBUG)
-    grabaRegistro(EV_RESET);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_RESET);
+    // #endif
     break;
   case EV_RXCOMPLETE:
     // data received in ping slot
-#if defined(DEBUG)
-    grabaRegistro(EV_RXCOMPLETE);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_RXCOMPLETE);
+    // #endif
     break;
   case EV_LINK_DEAD:
-#if defined(DEBUG)
-    grabaRegistro(EV_LINK_DEAD);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_LINK_DEAD);
+    // #endif
     break;
   case EV_LINK_ALIVE:
-#if defined(DEBUG)
-    grabaRegistro(EV_LINK_ALIVE);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_LINK_ALIVE);
+    // #endif
     break;
   case EV_TXSTART:
-#if defined(DEBUG)
-    grabaRegistro(EV_TXSTART);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_TXSTART);
+    // #endif
     break;
   case EV_TXCANCELED:
-#if defined(DEBUG)
-    grabaRegistro(EV_TXCANCELED);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_TXCANCELED);
+    // #endif
     break;
   case EV_RXSTART:
     /* No utilizar el monitor serial en este evento. */
-#if defined(DEBUG)
-    grabaRegistro(EV_RXSTART);
-#endif
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_RXSTART);
+    // #endif
     break;
   case EV_JOIN_TXCOMPLETE:
-#if defined(DEBUG)
-    grabaRegistro(EV_JOIN_TXCOMPLETE);
-#endif
-    aDormir = true;
+    // #if defined(DEBUG)
+    //     grabaRegistro(EV_JOIN_TXCOMPLETE);
+    // #endif
+    // aDormir = true;
     break;
   default:
-#if defined(DEBUG)
-    Serial2.println(F("Unknown event"));
-    Serial2.println((unsigned)ev);
-#endif
+    // #if defined(DEBUG)
+    //     Serial2.println(F("Unknown event"));
+    //     Serial2.println((unsigned)ev);
+    // #endif
     break;
   }
-  envioEnCurso = false;
 }
 
 void lecturaDatos()
@@ -411,6 +379,10 @@ void lecturaDatos()
   // Pasamos los datos a formato Cayenne
   datosCayenne.reset();
   datosCayenne.addAnalogInput(1, temperatura);
+  datosCayenne.addAnalogInput(2, ADC_BateriaLeerVoltaje()); //Batería en Voltios.
+#if defined(DEBUG)
+  grabaRegistro(EV_LECTURADATOS);
+#endif
 }
 
 void do_send(osjob_t *j)
@@ -419,7 +391,7 @@ void do_send(osjob_t *j)
   Serial2.println(F("Evento do_send()"));
 #endif
 
-   // Check if there is not a current TX/RX job running
+  // Check if there is not a current TX/RX job running
   if (!(LMIC.opmode & OP_TXRXPEND))
   {
     // Prepare upstream data transmission at the next possible time.
@@ -442,18 +414,18 @@ void do_send(osjob_t *j)
 // Graba un evento en la EEPROM
 void grabaRegistro(int evento)
 {
-	registro.evento = evento;
-	registro.tiempo = millis();
-	EEPROM.put(size_Grabado, registro);
-	size_Grabado += size_registro;
-	//
-	if (size_Grabado + size_registro > size_eeprom)
-	{
-		digitalWrite(DD0, HIGH);
-		while (true)
-		{
-			/* code */
-		}
-	}
+  registro.evento = evento;
+  registro.tiempo = millis();
+  EEPROM.put(size_Grabado, registro);
+  size_Grabado += size_registro;
+  //
+  if (size_Grabado + size_registro > size_eeprom)
+  {
+    digitalWrite(DD0, HIGH);
+    while (true)
+    {
+      /* code */
+    }
+  }
 }
 #endif
